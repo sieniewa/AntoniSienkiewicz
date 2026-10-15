@@ -7,6 +7,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
+import math
 
 
 class AStarCalculator(Node):
@@ -61,6 +62,26 @@ class AStarCalculator(Node):
     def cost_map_callback(self, map_msg: OccupancyGrid) -> None:
         self.map_cost = map_msg
 
+    def choose_and_remove(self, opened):
+        opened
+        return min_value
+    
+    def calculate_neighbors(self, x):
+        neighbors = []
+        return neighbors
+    
+    def construct_path(self, previous, current):
+        path = [current]
+        while current in previous:
+            current = previous[current]
+            path.append(current)
+        return path
+    
+    def calculate_h(self, start):
+        
+        h = math.sqrt((x1 - xg)**2 + (y1 - yg)**2)
+        return h
+    
     def a_star(self, start: PoseStamped, end: PoseStamped) -> None:
         calculated_path = Path()
         calculated_path.header.frame_id = 'map'
@@ -68,6 +89,43 @@ class AStarCalculator(Node):
         calculated_path.poses.append(start)
         calculated_path.poses.append(end)
         self.publisher.publish(calculated_path)
+        been = []
+        goal = end
+        g = {}
+        h = self.calculate_h(start)
+        previous = {}
+        g[start] = 0
+        opened = {}
+        opened[start] = g[start] + h(start)
+
+        while len(opened) > 0:
+            x = self.choose_and_remove(opened)
+            if x == goal:
+                return self.construct_path(previous, goal)
+            been.append(x)
+            neighbors_x = self.calculate_neighbors(x)
+            for y in neighbors_x:
+                if y in been:
+                    continue
+                g_temp = g[x] + self.weight(x, y)
+                if y not in g or g_temp < g[y]:
+                    previous[y] = x
+                    g[y] = g_temp
+                    opened[y] = g[y] + h(y)
+        return fail
+
+    def weight(self, x, y):
+        k = 2
+        w = self.d(x, y) * (1 + k * (self.cost(y)/100))
+        return w
+    
+    def cost(self, y):
+        c = 0
+        return c
+
+    def d(self, x, y):
+        distance = math.sqrt((x1 - xg)**2 + (y1 - yg)**2)
+        return distance
 
 
 def main(args=None) -> None:
