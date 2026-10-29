@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import math
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Path
 import rclpy
@@ -7,7 +7,20 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
-import math
+
+
+# Ruchy: [dx, dy, koszt_ruchu]
+# Ruchy proste mają koszt 1.0, ruchy po przekątnej sqrt(2) ≈ 1.414
+NEIGHBOR_OFFSETS = [
+    ( 0,  1, 1.0),   # Góra
+    ( 0, -1, 1.0),   # Dół
+    ( 1,  0, 1.0),   # Prawo
+    (-1,  0, 1.0),   # Lewo
+    ( 1,  1, 1.414), # Góra-Prawo
+    (-1,  1, 1.414), # Góra-Lewo
+    ( 1, -1, 1.414), # Dół-Prawo
+    (-1, -1, 1.414)  # Dół-Lewo
+]
 
 
 class AStarCalculator(Node):
@@ -62,25 +75,51 @@ class AStarCalculator(Node):
     def cost_map_callback(self, map_msg: OccupancyGrid) -> None:
         self.map_cost = map_msg
 
-    def choose_and_remove(self, opened):
-        opened
-        return min_value
+    def choose_and_remove(self, opened: dict, start: PoseStamped, end: PoseStamped):
+        min_val = opened[start]
+        f_val = opened[start]
+        for i in range(len(opened)):
+            h = self.distance(opened[i], end)
+            g = self.distance(start, opened[i])
+            f_val = g + h
+            if f_val < min_val:
+                min_val = f_val
+                min_f = opened[i]
+        opened.pop(min_f)
+        return min_f
     
-    def calculate_neighbors(self, x):
+    def get_8_neighbors(current, mapa):
+    
         neighbors = []
-        return neighbors
-    
-    def construct_path(self, previous, current):
-        path = [current]
-        while current in previous:
-            current = previous[current]
-            path.append(current)
-        return path
-    
-    def calculate_h(self, start):
+        map_height = len(mapa)
+        map_width = len(mapa[0])
         
-        h = math.sqrt((x1 - xg)**2 + (y1 - yg)**2)
-        return h
+        current_x = current.x
+        current_y = current.y
+
+        for dx, dy, move_cost in NEIGHBOR_OFFSETS:
+            neighbor_x = current_x + dx
+            neighbor_y = current_y + dy
+
+            # 1. Sprawdzenie granic mapy
+            if 0 <= neighbor_x < map_width and 0 <= neighbor_y < map_height:
+                
+                # 2. Sprawdzenie, czy komórka nie jest przeszkodą
+                if mapa[neighbor_y][neighbor_x] == 0: # 0 oznacza wolną przestrzeń
+                    
+                    # 3. Blokada "ścinania zakrętów" (Corner Cutting)
+                    # Jeśli idziemy po skosie, sprawdź czy przejście nie blokuje się o narożnik robotem
+                    if dx != 0 and dy != 0:
+                        if mapa[current_y][current_x + dx] != 0 or mapa[current_y + dy][current_x] != 0:
+                            continue # Pomiń ten krok, jeśli narożniki są zablokowane
+                    
+                    neighbors.append({
+                        'x': neighbor_x,
+                        'y': neighbor_y,
+                        'cost': move_cost
+                    })
+                    
+        return neighbors
     
     def a_star(self, start: PoseStamped, end: PoseStamped) -> None:
         calculated_path = Path()
@@ -92,18 +131,19 @@ class AStarCalculator(Node):
         been = []
         goal = end
         g = {}
-        h = self.calculate_h(start)
+        h = {}
+        h[start] = self.distance(start, end)
         previous = {}
         g[start] = 0
         opened = {}
-        opened[start] = g[start] + h(start)
+        opened[start] = g[start] + h[start]
 
         while len(opened) > 0:
             x = self.choose_and_remove(opened)
             if x == goal:
-                return self.construct_path(previous, goal)
+                return self.construct_path(previous, x)
             been.append(x)
-            neighbors_x = self.calculate_neighbors(x)
+            neighbors_x = self.calculate_neighbors(x, self.map_dilated.data)
             for y in neighbors_x:
                 if y in been:
                     continue
@@ -114,18 +154,30 @@ class AStarCalculator(Node):
                     opened[y] = g[y] + h(y)
         return fail
 
-    def weight(self, x, y):
+    def weight(self, x: PoseStamped, y: PoseStamped):
         k = 2
-        w = self.d(x, y) * (1 + k * (self.cost(y)/100))
+        w = self.distance(x, y) * (1 + k * (self.cost(y)/100))
         return w
     
-    def cost(self, y):
-        c = 0
+    def cost(self, y: PoseStamped):
+        idx = y.pose.position.y * self.map_dilated.info.width + y.pose.position.x
+        c = self.map_dilated.data[idx]
         return c
 
-    def d(self, x, y):
-        distance = math.sqrt((x1 - xg)**2 + (y1 - yg)**2)
+    def distance(self, x: PoseStamped, y: PoseStamped):
+        x1 = x.pose.position.x
+        y1 = y.pose.position.x
+        x2 = x.pose.position.y
+        y2 = y.pose.position.y
+        distance = math.sqrt((x1 - y1)**2 + (x2 - y2)**2)
         return distance
+
+    def construct_path(previous: dict, current: PoseStamped):
+        path = [current]
+        while current in previous:
+            current = previous[current]
+            path.dodaj_na_początek(current)
+        return path
 
 
 def main(args=None) -> None:
