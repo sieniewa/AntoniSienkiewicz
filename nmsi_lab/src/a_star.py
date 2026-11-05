@@ -75,108 +75,149 @@ class AStarCalculator(Node):
     def cost_map_callback(self, map_msg: OccupancyGrid) -> None:
         self.map_cost = map_msg
 
-    def choose_and_remove(self, opened: dict, start: PoseStamped, end: PoseStamped):
-        min_val = opened[start]
-        f_val = opened[start]
-        for i in range(len(opened)):
-            h = self.distance(opened[i], end)
-            g = self.distance(start, opened[i])
-            f_val = g + h
-            if f_val < min_val:
-                min_val = f_val
-                min_f = opened[i]
-        opened.pop(min_f)
-        return min_f
-    
-    def get_8_neighbors(current, mapa):
-    
+    def choose_and_remove(self, opened):
+        current = min(opened, key=opened.get)
+        del opened[current]
+        return current
+
+    def calculate_neighbors(
+        self, current, grid: OccupancyGrid):
+        width = grid.info.width
+        height = grid.info.height
+        x, y = current
         neighbors = []
-        map_height = len(mapa)
-        map_width = len(mapa[0])
-        
-        current_x = current.x
-        current_y = current.y
+
+        def is_free(cell_x: int, cell_y: int):
+            if not (0 <= cell_x < width and 0 <= cell_y < height):
+                return False
+            value = grid.data[cell_y * width + cell_x]
+            return 0 <= value < 65
 
         for dx, dy, move_cost in NEIGHBOR_OFFSETS:
-            neighbor_x = current_x + dx
-            neighbor_y = current_y + dy
+            neighbor_x = x + dx
+            neighbor_y = y + dy
+            if not is_free(neighbor_x, neighbor_y):
+                continue
+            if dx != 0 and dy != 0:
+                if not is_free(x + dx, y) or not is_free(x, y + dy):
+                    continue
+            neighbors.append(((neighbor_x, neighbor_y), move_cost))
 
-            # 1. Sprawdzenie granic mapy
-            if 0 <= neighbor_x < map_width and 0 <= neighbor_y < map_height:
-                
-                # 2. Sprawdzenie, czy komórka nie jest przeszkodą
-                if mapa[neighbor_y][neighbor_x] == 0: # 0 oznacza wolną przestrzeń
-                    
-                    # 3. Blokada "ścinania zakrętów" (Corner Cutting)
-                    # Jeśli idziemy po skosie, sprawdź czy przejście nie blokuje się o narożnik robotem
-                    if dx != 0 and dy != 0:
-                        if mapa[current_y][current_x + dx] != 0 or mapa[current_y + dy][current_x] != 0:
-                            continue # Pomiń ten krok, jeśli narożniki są zablokowane
-                    
-                    neighbors.append({
-                        'x': neighbor_x,
-                        'y': neighbor_y,
-                        'cost': move_cost
-                    })
-                    
         return neighbors
     
     def a_star(self, start: PoseStamped, end: PoseStamped) -> None:
-        calculated_path = Path()
-        calculated_path.header.frame_id = 'map'
-        calculated_path.header.stamp = self.get_clock().now().to_msg()
-        calculated_path.poses.append(start)
-        calculated_path.poses.append(end)
-        self.publisher.publish(calculated_path)
-        been = []
-        goal = end
-        g = {}
-        h = {}
-        h[start] = self.distance(start, end)
+        if self.map_dilated is None:
+            self.get_logger().warning('Brak: /map_dilated is not available')
+            return
+
+        grid = self.map_dilated
+        width = grid.info.width
+        height = grid.info.height
+        if width == 0 or height == 0 or grid.info.resolution <= 0:
+            self.get_logger().warning('Brak: /map_dilated has invalid dimensions')
+            return
+
+        start_cell = self.meters_to_cell(start, grid)
+        goal_cell = self.meters_to_cell(end, grid)
+        if not self.cell_in_bounds(start_cell, width, height):
+            self.get_logger().warning('Brak: start is outside the map')
+            return
+        if (not self.cell_in_bounds(goal_cell, width, height)
+                or not self.cell_is_free(goal_cell, grid)):
+            self.get_logger().warning('Brak: goal is blocked or outside the map')
+            return
+        if not self.cell_in_bounds(goal_cell, width, height):
+                    self.get_logger().warning('Brak: goal is outside the map')
+                    return
+
+        costs_available = (
+            self.map_cost is not None
+            and self.map_cost.info.width == width
+            and self.map_cost.info.height == height
+        )
+        cost_scale = 5.0
+        g_score = {start_cell: 0.0}
         previous = {}
-        g[start] = 0
-        opened = {}
-        opened[start] = g[start] + h[start]
+        opened = {start_cell: self.distance(start_cell, goal_cell, grid)}
+        closed = set()
 
-        while len(opened) > 0:
-            x = self.choose_and_remove(opened)
-            if x == goal:
-                return self.construct_path(previous, x)
-            been.append(x)
-            neighbors_x = self.calculate_neighbors(x, self.map_dilated.data)
-            for y in neighbors_x:
-                if y in been:
+        while opened:
+            current = self.choose_and_remove(opened)
+            if current == goal_cell:
+                cells = self.construct_path(previous, current)
+                calculated_path = Path()
+                calculated_path.header.frame_id = 'map'
+                calculated_path.header.stamp = self.get_clock().now().to_msg()
+                calculated_path.poses.append(start)
+                for cell in cells[1:]:
+                    calculated_path.poses.append(self.cell_to_pose(cell, grid))
+                calculated_path.poses.append(end)
+                self.publisher.publish(calculated_path)
+                return
+
+            closed.add(current)
+            for neighbor, move_cost in self.calculate_neighbors(current, grid):
+                if neighbor in closed:
                     continue
-                g_temp = g[x] + self.weight(x, y)
-                if y not in g or g_temp < g[y]:
-                    previous[y] = x
-                    g[y] = g_temp
-                    opened[y] = g[y] + h(y)
-        return fail
+                edge_cost = move_cost * grid.info.resolution
+                if costs_available:
+                    idx = neighbor[1] * width + neighbor[0]
+                    map_cost = self.map_cost.data[idx]
+                    if map_cost >= 0:
+                        edge_cost *= 1.0 + cost_scale * (map_cost / 100.0)
+                tent_g = g_score[current] + edge_cost
+                if tent_g < g_score.get(neighbor, math.inf):
+                    previous[neighbor] = current
+                    g_score[neighbor] = tent_g
+                    heuristic = self.distance(neighbor, goal_cell, grid)
+                    opened[neighbor] = tent_g + heuristic
 
-    def weight(self, x: PoseStamped, y: PoseStamped):
-        k = 2
-        w = self.distance(x, y) * (1 + k * (self.cost(y)/100))
-        return w
-    
-    def cost(self, y: PoseStamped):
-        idx = y.pose.position.y * self.map_dilated.info.width + y.pose.position.x
-        c = self.map_dilated.data[idx]
-        return c
+        self.get_logger().warning('Brak: no path to goal')
 
-    def distance(self, x: PoseStamped, y: PoseStamped):
-        x1 = x.pose.position.x
-        y1 = y.pose.position.x
-        x2 = x.pose.position.y
-        y2 = y.pose.position.y
-        distance = math.sqrt((x1 - y1)**2 + (x2 - y2)**2)
-        return distance
+    def meters_to_cell(self, pose: PoseStamped, grid: OccupancyGrid):
+        resolution = grid.info.resolution
+        origin = grid.info.origin.position
+        x = math.floor((pose.pose.position.x - origin.x) / resolution)
+        y = math.floor((pose.pose.position.y - origin.y) / resolution)
+        return x, y
 
-    def construct_path(previous: dict, current: PoseStamped):
+    def cell_in_bounds(
+        self, cell, width: int, height: int
+    ) -> bool:
+        x, y = cell
+        return 0 <= x < width and 0 <= y < height
+
+    def cell_is_free(self, cell, grid: OccupancyGrid):
+        x, y = cell
+        value = grid.data[y * grid.info.width + x]
+        return 0 <= value < 65
+
+    def cell_to_pose(self, cell, grid: OccupancyGrid) -> PoseStamped:
+        pose = PoseStamped()
+        pose.header.frame_id = 'map'
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = (
+            grid.info.origin.position.x + (cell[0] + 0.5) * grid.info.resolution
+        )
+        pose.pose.position.y = (
+            grid.info.origin.position.y + (cell[1] + 0.5) * grid.info.resolution
+        )
+        pose.pose.orientation.w = 1.0
+        return pose
+
+    def distance(
+        self, first, second, grid: OccupancyGrid
+    ) -> float:
+        dx = (first[0] - second[0]) * grid.info.resolution
+        dy = (first[1] - second[1]) * grid.info.resolution
+        return math.hypot(dx, dy)
+
+    def construct_path(self, previous, current):
         path = [current]
         while current in previous:
             current = previous[current]
-            path.dodaj_na_początek(current)
+            path.append(current)
+        path.reverse()
         return path
 
 
